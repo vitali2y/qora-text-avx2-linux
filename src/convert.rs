@@ -1,11 +1,11 @@
-//! Convert QORA-4B safetensors → .qor4b binary format (one-time conversion tool).
+//! Convert QORA-4B safetensors → .qor4b binary format (one-time conversion tool)
 //!
 //! Usage: convert --input <safetensors_dir> --output model.qor4b [--format q4|f16]
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::io::{BufWriter, Write};
 use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use half::f16;
 use memmap2::Mmap;
@@ -19,16 +19,31 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--input" => { if i+1 < args.len() { input_dir = PathBuf::from(&args[i+1]); i += 1; } }
-            "--output" => { if i+1 < args.len() { output_path = PathBuf::from(&args[i+1]); i += 1; } }
-            "--format" => { if i+1 < args.len() { format = args[i+1].clone(); i += 1; } }
+            "--input" => {
+                if i + 1 < args.len() {
+                    input_dir = PathBuf::from(&args[i + 1]);
+                    i += 1;
+                }
+            }
+            "--output" => {
+                if i + 1 < args.len() {
+                    output_path = PathBuf::from(&args[i + 1]);
+                    i += 1;
+                }
+            }
+            "--format" => {
+                if i + 1 < args.len() {
+                    format = args[i + 1].clone();
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
     }
 
     let format_id: u8 = if format == "f16" { 0 } else { 1 };
-    eprintln!("QOR4B Converter");
+    eprintln!("QORA Converter");
     eprintln!("  Input:  {}", input_dir.display());
     eprintln!("  Output: {}", output_path.display());
     eprintln!("  Format: {} (id={})", format, format_id);
@@ -45,7 +60,10 @@ fn main() {
             std::process::exit(1);
         }
         let mut map = HashMap::new();
-        map.insert("__single__".to_string(), single.to_string_lossy().to_string());
+        map.insert(
+            "__single__".to_string(),
+            single.to_string_lossy().to_string(),
+        );
         map
     };
 
@@ -66,7 +84,7 @@ fn main() {
     eprintln!("Loaded {} tensors total", all_tensors.len());
 
     // Build config
-    let config = qor4b::config::Qor4bConfig::default_4b();
+    let config = qora::config::Qor4bConfig::default_4b();
     let _hidden = config.hidden_size;
     let num_layers = config.num_layers;
 
@@ -75,7 +93,7 @@ fn main() {
 
     // Header
     w.write_all(b"QOR4").unwrap();
-    w.write_all(&2u32.to_le_bytes()).unwrap(); // version 2: f16 vision
+    w.write_all(&2u32.to_le_bytes()).unwrap(); // version 2: legacy-compatible container
     w.write_all(&[format_id]).unwrap();
 
     // Config
@@ -95,7 +113,7 @@ fn main() {
     write_f64(&mut w, config.rms_norm_eps);
     write_u32(&mut w, config.eos_token_id);
     w.write_all(&[config.tie_word_embeddings as u8]).unwrap();
-    w.write_all(&[config.has_vision as u8]).unwrap();
+    w.write_all(&[0u8]).unwrap(); // strictly text-only; no vision section follows
 
     // Layer types
     for lt in &config.layer_types {
@@ -108,59 +126,175 @@ fn main() {
         let lt = &config.layer_types[i];
 
         match lt {
-            qor4b::config::LayerType::DeltaNet => {
+            qora::config::LayerType::DeltaNet => {
                 eprintln!("  Layer {i}/{num_layers} (DeltaNet)...");
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.linear_attn.in_proj_qkv.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.linear_attn.in_proj_a.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.linear_attn.in_proj_b.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.linear_attn.in_proj_z.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.linear_attn.out_proj.weight"), format_id);
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.in_proj_qkv.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.in_proj_a.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.in_proj_b.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.in_proj_z.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.out_proj.weight"),
+                    format_id,
+                );
                 // conv1d, A_log, dt_bias as f32
-                write_tensor_f32(&mut w, &all_tensors, &format!("{prefix}.linear_attn.conv1d.weight"));
+                write_tensor_f32(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.conv1d.weight"),
+                );
                 write_tensor_f32(&mut w, &all_tensors, &format!("{prefix}.linear_attn.A_log"));
-                write_tensor_f32(&mut w, &all_tensors, &format!("{prefix}.linear_attn.dt_bias"));
+                write_tensor_f32(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.dt_bias"),
+                );
                 // norm as f16
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.linear_attn.norm.weight"));
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.linear_attn.norm.weight"),
+                );
                 // MLP
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.gate_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.up_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.down_proj.weight"), format_id);
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.gate_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.up_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.down_proj.weight"),
+                    format_id,
+                );
                 // Norms
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.input_layernorm.weight"));
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.post_attention_layernorm.weight"));
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.input_layernorm.weight"),
+                );
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.post_attention_layernorm.weight"),
+                );
             }
-            qor4b::config::LayerType::FullAttn => {
+            qora::config::LayerType::FullAttn => {
                 eprintln!("  Layer {i}/{num_layers} (FullAttn)...");
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.self_attn.q_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.self_attn.k_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.self_attn.v_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.self_attn.o_proj.weight"), format_id);
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.self_attn.q_norm.weight"));
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.self_attn.k_norm.weight"));
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.q_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.k_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.v_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.o_proj.weight"),
+                    format_id,
+                );
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.q_norm.weight"),
+                );
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.self_attn.k_norm.weight"),
+                );
                 // MLP
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.gate_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.up_proj.weight"), format_id);
-                write_tensor_weight(&mut w, &all_tensors, &format!("{prefix}.mlp.down_proj.weight"), format_id);
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.gate_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.up_proj.weight"),
+                    format_id,
+                );
+                write_tensor_weight(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.mlp.down_proj.weight"),
+                    format_id,
+                );
                 // Norms
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.input_layernorm.weight"));
-                write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.post_attention_layernorm.weight"));
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.input_layernorm.weight"),
+                );
+                write_tensor_f16(
+                    &mut w,
+                    &all_tensors,
+                    &format!("{prefix}.post_attention_layernorm.weight"),
+                );
             }
         }
     }
 
     // Embedding (tied to lm_head)
     // Embedding needs k=vocab, n=hidden (transposed from standard GEMV layout)
-    // because embed_lookup indexes by token_id to get one hidden-dim row.
-    // Also written as-is (not transposed) for lm_head GEMV where k=hidden, n=vocab.
+    // because embed_lookup indexes by token_id to get one hidden-dim row
+    // Also written as-is (not transposed) for lm_head GEMV where k=hidden, n=vocab
     eprintln!("  Embedding...");
-    write_embedding_weight(&mut w, &all_tensors, "model.language_model.embed_tokens.weight", format_id);
+    write_embedding_weight(
+        &mut w,
+        &all_tensors,
+        "model.language_model.embed_tokens.weight",
+        format_id,
+    );
 
     // Final norm
     write_tensor_f16(&mut w, &all_tensors, "model.language_model.norm.weight");
 
     // RoPE tables (precompute partial RoPE)
     let rope_dim = config.rope_dim(); // 64 (256 * 0.25)
-    let half_dim = rope_dim / 2;      // 32
+    let half_dim = rope_dim / 2; // 32
     let max_pos = 8192; // reasonable default
     let mut rope_cos = vec![0.0f32; max_pos * half_dim];
     let mut rope_sin = vec![0.0f32; max_pos * half_dim];
@@ -175,43 +309,13 @@ fn main() {
     write_f32_vec(&mut w, &rope_cos);
     write_f32_vec(&mut w, &rope_sin);
 
-    // Vision weights (stored as f16 for compact size, source is bf16 anyway)
-    if config.has_vision {
-        eprintln!("  Vision encoder (f16)...");
-        // Patch embedding
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.patch_embed.proj.weight");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.patch_embed.proj.bias");
-        // Positional embedding
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.pos_embed.weight");
-        // 24 vision blocks
-        for b in 0..config.vision_layers {
-            let prefix = format!("model.visual.blocks.{b}");
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.norm1.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.norm1.bias"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.attn.qkv.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.attn.qkv.bias"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.attn.proj.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.attn.proj.bias"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.norm2.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.norm2.bias"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.mlp.linear_fc1.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.mlp.linear_fc1.bias"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.mlp.linear_fc2.weight"));
-            write_tensor_f16(&mut w, &all_tensors, &format!("{prefix}.mlp.linear_fc2.bias"));
-            if b % 6 == 0 { eprintln!("    Vision block {b}/{}...", config.vision_layers); }
-        }
-        // Merger
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.norm.weight");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.norm.bias");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.linear_fc1.weight");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.linear_fc1.bias");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.linear_fc2.weight");
-        write_tensor_f16(&mut w, &all_tensors, "model.visual.merger.linear_fc2.bias");
-    }
-
     w.flush().unwrap();
     let file_size = std::fs::metadata(&output_path).unwrap().len();
-    eprintln!("Done! Output: {} ({:.1} MB)", output_path.display(), file_size as f64 / 1024.0 / 1024.0);
+    eprintln!(
+        "Done! Output: {} ({:.1} MB)",
+        output_path.display(),
+        file_size as f64 / 1024.0 / 1024.0
+    );
 }
 
 // ============================================================
@@ -231,7 +335,7 @@ impl TensorData {
                 let count = self.data.len() / 2;
                 let mut out = Vec::with_capacity(count);
                 for i in 0..count {
-                    let bits = u16::from_le_bytes([self.data[i*2], self.data[i*2+1]]);
+                    let bits = u16::from_le_bytes([self.data[i * 2], self.data[i * 2 + 1]]);
                     let f32_bits = (bits as u32) << 16;
                     out.push(f32::from_bits(f32_bits));
                 }
@@ -241,7 +345,7 @@ impl TensorData {
                 let count = self.data.len() / 2;
                 let mut out = Vec::with_capacity(count);
                 for i in 0..count {
-                    let bits = u16::from_le_bytes([self.data[i*2], self.data[i*2+1]]);
+                    let bits = u16::from_le_bytes([self.data[i * 2], self.data[i * 2 + 1]]);
                     out.push(f16::from_bits(bits).to_f32());
                 }
                 out
@@ -250,7 +354,12 @@ impl TensorData {
                 let count = self.data.len() / 4;
                 let mut out = Vec::with_capacity(count);
                 for i in 0..count {
-                    let bytes = [self.data[i*4], self.data[i*4+1], self.data[i*4+2], self.data[i*4+3]];
+                    let bytes = [
+                        self.data[i * 4],
+                        self.data[i * 4 + 1],
+                        self.data[i * 4 + 2],
+                        self.data[i * 4 + 3],
+                    ];
                     out.push(f32::from_le_bytes(bytes));
                 }
                 out
@@ -276,7 +385,7 @@ fn load_index(path: &Path) -> HashMap<String, String> {
         let wm_str = &content[wm_start..];
         if let Some(brace_start) = wm_str.find('{') {
             if let Some(brace_end) = wm_str.find('}') {
-                let inner = &wm_str[brace_start+1..brace_end];
+                let inner = &wm_str[brace_start + 1..brace_end];
                 for line in inner.split(',') {
                     let parts: Vec<&str> = line.split(':').collect();
                     if parts.len() == 2 {
@@ -310,15 +419,28 @@ fn load_safetensors(path: &Path) -> HashMap<String, TensorData> {
     let parsed: serde_json::Value = serde_json::from_str(header_json).unwrap();
     if let serde_json::Value::Object(map) = parsed {
         for (name, info) in map {
-            if name == "__metadata__" { continue; }
+            if name == "__metadata__" || name.starts_with("model.visual.") {
+                continue;
+            }
             let dtype = info["dtype"].as_str().unwrap().to_string();
-            let shape: Vec<usize> = info["shape"].as_array().unwrap()
-                .iter().map(|v| v.as_u64().unwrap() as usize).collect();
+            let shape: Vec<usize> = info["shape"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
             let offsets = info["data_offsets"].as_array().unwrap();
             let start = offsets[0].as_u64().unwrap() as usize;
             let end = offsets[1].as_u64().unwrap() as usize;
             let tensor_data = data[data_start + start..data_start + end].to_vec();
-            tensors.insert(name, TensorData { data: tensor_data, dtype, shape });
+            tensors.insert(
+                name,
+                TensorData {
+                    data: tensor_data,
+                    dtype,
+                    shape,
+                },
+            );
         }
     }
     tensors
@@ -328,11 +450,18 @@ fn load_safetensors(path: &Path) -> HashMap<String, TensorData> {
 // Weight writing helpers
 // ============================================================
 
-/// Write a weight matrix (f16 or Q4 format).
-/// PyTorch Linear weights are [out_dim, in_dim] row-major.
-/// GEMV needs [in_dim, out_dim] row-major (transposed).
-fn write_tensor_weight(w: &mut impl Write, tensors: &HashMap<String, TensorData>, name: &str, format_id: u8) {
-    let t = tensors.get(name).unwrap_or_else(|| panic!("Missing tensor: {name}"));
+/// Write a weight matrix (f16 or Q4 format)
+/// PyTorch Linear weights are [out_dim, in_dim] row-major
+/// GEMV needs [in_dim, out_dim] row-major (transposed)
+fn write_tensor_weight(
+    w: &mut impl Write,
+    tensors: &HashMap<String, TensorData>,
+    name: &str,
+    format_id: u8,
+) {
+    let t = tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("Missing tensor: {name}"));
     let raw = t.to_f32();
     let shape = &t.shape;
 
@@ -384,16 +513,26 @@ fn write_tensor_weight(w: &mut impl Write, tensors: &HashMap<String, TensorData>
     }
 }
 
-/// Write embedding weight: shape [vocab, hidden].
-/// For embed_lookup: stored with k=vocab, n=hidden (each row = one token).
-/// The data is NOT transposed — stored in original [vocab, hidden] layout.
-fn write_embedding_weight(w: &mut impl Write, tensors: &HashMap<String, TensorData>, name: &str, format_id: u8) {
-    let t = tensors.get(name).unwrap_or_else(|| panic!("Missing tensor: {name}"));
+/// Write embedding weight: shape [vocab, hidden]
+/// For embed_lookup: stored with k=vocab, n=hidden (each row = one token)
+/// The data is NOT transposed — stored in original [vocab, hidden] layout
+fn write_embedding_weight(
+    w: &mut impl Write,
+    tensors: &HashMap<String, TensorData>,
+    name: &str,
+    format_id: u8,
+) {
+    let t = tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("Missing tensor: {name}"));
     let f32_data = t.to_f32();
     let shape = &t.shape;
     // Embedding shape: [vocab_size, hidden_size]
     let (k, n) = (shape[0], shape[1]); // k=vocab (rows), n=hidden (cols)
-    eprintln!("    Embedding: shape [{}, {}] → k={k}, n={n}", shape[0], shape[1]);
+    eprintln!(
+        "    Embedding: shape [{}, {}] → k={k}, n={n}",
+        shape[0], shape[1]
+    );
 
     write_u64(w, k as u64);
     write_u64(w, n as u64);
@@ -414,16 +553,20 @@ fn write_embedding_weight(w: &mut impl Write, tensors: &HashMap<String, TensorDa
     }
 }
 
-/// Write a tensor as f32 (for small tensors like A_log, dt_bias, conv1d).
+/// Write a tensor as f32 (for small tensors like A_log, dt_bias, conv1d)
 fn write_tensor_f32(w: &mut impl Write, tensors: &HashMap<String, TensorData>, name: &str) {
-    let t = tensors.get(name).unwrap_or_else(|| panic!("Missing tensor: {name}"));
+    let t = tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("Missing tensor: {name}"));
     let data = t.to_f32();
     write_f32_vec(w, &data);
 }
 
-/// Write a tensor as f16 (for norms).
+/// Write a tensor as f16 (for norms)
 fn write_tensor_f16(w: &mut impl Write, tensors: &HashMap<String, TensorData>, name: &str) {
-    let t = tensors.get(name).unwrap_or_else(|| panic!("Missing tensor: {name}"));
+    let t = tensors
+        .get(name)
+        .unwrap_or_else(|| panic!("Missing tensor: {name}"));
     let data = t.to_f16();
     write_f16_vec(w, &data);
 }
@@ -432,11 +575,14 @@ fn write_tensor_f16(w: &mut impl Write, tensors: &HashMap<String, TensorData>, n
 // Q4 quantization
 // ============================================================
 
-/// Quantize f32 data to Q4 symmetric (group_size=32).
-/// Returns (packed_bytes, scales).
+/// Quantize f32 data to Q4 symmetric (group_size=32)
+/// Returns (packed_bytes, scales)
 fn quantize_q4(data: &[f32], k: usize, n: usize) -> (Vec<u8>, Vec<f16>) {
     let group_size = 32;
-    assert!(n % group_size == 0, "n={n} not divisible by group_size={group_size}");
+    assert!(
+        n % group_size == 0,
+        "n={n} not divisible by group_size={group_size}"
+    );
     let groups_per_row = n / group_size;
     let packed_per_group = group_size / 2;
 
@@ -457,7 +603,7 @@ fn quantize_q4(data: &[f32], k: usize, n: usize) -> (Vec<u8>, Vec<f16>) {
             let inv_scale = if scale > 0.0 { 1.0 / scale } else { 0.0 };
             for j in (0..group_size).step_by(2) {
                 let q0 = ((group[j] * inv_scale).round() as i32).clamp(-8, 7) + 8;
-                let q1 = ((group[j+1] * inv_scale).round() as i32).clamp(-8, 7) + 8;
+                let q1 = ((group[j + 1] * inv_scale).round() as i32).clamp(-8, 7) + 8;
                 packed.push((q0 as u8) | ((q1 as u8) << 4));
             }
         }
@@ -470,10 +616,18 @@ fn quantize_q4(data: &[f32], k: usize, n: usize) -> (Vec<u8>, Vec<f16>) {
 // I/O helpers
 // ============================================================
 
-fn write_u32(w: &mut impl Write, val: u32) { w.write_all(&val.to_le_bytes()).unwrap(); }
-fn write_u64(w: &mut impl Write, val: u64) { w.write_all(&val.to_le_bytes()).unwrap(); }
-fn write_f32(w: &mut impl Write, val: f32) { w.write_all(&val.to_le_bytes()).unwrap(); }
-fn write_f64(w: &mut impl Write, val: f64) { w.write_all(&val.to_le_bytes()).unwrap(); }
+fn write_u32(w: &mut impl Write, val: u32) {
+    w.write_all(&val.to_le_bytes()).unwrap();
+}
+fn write_u64(w: &mut impl Write, val: u64) {
+    w.write_all(&val.to_le_bytes()).unwrap();
+}
+fn write_f32(w: &mut impl Write, val: f32) {
+    w.write_all(&val.to_le_bytes()).unwrap();
+}
+fn write_f64(w: &mut impl Write, val: f64) {
+    w.write_all(&val.to_le_bytes()).unwrap();
+}
 
 fn write_f16_vec(w: &mut impl Write, data: &[f16]) {
     let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2) };

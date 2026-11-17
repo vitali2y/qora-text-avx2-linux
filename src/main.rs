@@ -1,81 +1,127 @@
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Read};
 use std::time::Instant;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+use argh::FromArgs;
 
-    // Parse flags
-    let no_think = args.iter().any(|a| a == "--no-think");
-    let greedy = args.iter().any(|a| a == "--greedy");
-    let show_think = args.iter().any(|a| a == "--show-think");
-    #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
-    let force_cpu = args.iter().any(|a| a == "--cpu");
+/// QORA text-only CPU inference engine
+#[derive(FromArgs)]
+struct Args {
+    /// prompt text (takes precedence over stdin when both are supplied)
+    #[argh(option)]
+    prompt: Option<String>,
 
-    // Track whether user explicitly set these
-    let mut max_tokens_explicit = false;
-    let mut think_budget_explicit = false;
+    /// maximum number of generated tokens
+    #[argh(option)]
+    max_tokens: Option<usize>,
 
-    // Parse key-value arguments
-    let mut prompt = String::from("Hello, how are you?");
-    let mut max_tokens: usize = 1024;
-    let mut think_budget: usize = 1024;
-    let mut image_path: Option<PathBuf> = None;
-    let mut video_path: Option<PathBuf> = None;
+    /// thinking token budget
+    #[argh(option)]
+    think_budget: Option<usize>,
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--prompt" => {
-                if i + 1 < args.len() { prompt = args[i + 1].clone(); i += 1; }
-            }
-            "--max-tokens" => {
-                if i + 1 < args.len() {
-                    max_tokens = args[i + 1].parse().unwrap_or(1024);
-                    max_tokens_explicit = true;
-                    i += 1;
-                }
-            }
-            "--think-budget" => {
-                if i + 1 < args.len() {
-                    think_budget = args[i + 1].parse().unwrap_or(1024);
-                    think_budget_explicit = true;
-                    i += 1;
-                }
-            }
-            "--image" => {
-                if i + 1 < args.len() { image_path = Some(PathBuf::from(&args[i + 1])); i += 1; }
-            }
-            "--video" => {
-                if i + 1 < args.len() { video_path = Some(PathBuf::from(&args[i + 1])); i += 1; }
-            }
-            _ => {}
-        }
-        i += 1;
+    /// disable thinking
+    #[argh(switch)]
+    no_think: bool,
+
+    /// use greedy decoding (temp. = 0)
+    #[argh(switch)]
+    greedy: bool,
+
+    /// display thinking tokens
+    #[argh(switch)]
+    show_think: bool,
+
+    /// print diagnostic and progress information to stderr
+    #[argh(switch)]
+    verbose: bool,
+
+    /// print version information
+    #[argh(switch, short = 'V')]
+    version: bool,
+}
+
+fn read_prompt(explicit_prompt: Option<String>) -> io::Result<String> {
+    if let Some(prompt) = explicit_prompt {
+        return Ok(prompt);
     }
 
-    // System awareness
-    let sys = qor4b::system::SystemInfo::detect();
-    let limits = sys.smart_limits();
-    eprintln!("QORA-4B - Pure Rust Multimodal Inference Engine");
-    eprintln!("System: {} MB RAM ({} MB free), {} threads",
-        sys.total_ram_mb, sys.available_ram_mb, sys.cpu_threads);
+    let stdin = io::stdin();
+    if !stdin.is_terminal() {
+        let mut prompt = String::new();
+        stdin.lock().read_to_string(&mut prompt)?;
 
-    // Set defaults if user didn't specify
-    if !think_budget_explicit { think_budget = limits.default_think_budget; }
-    if !max_tokens_explicit { max_tokens = limits.default_max_tokens; }
+        if prompt.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdin was redirected or piped, but contained no prompt text",
+            ));
+        }
+
+        return Ok(prompt);
+    }
+
+    Ok(String::from("Hello, how are you?"))
+}
+
+fn main() {
+    let args: Args = argh::from_env();
+
+    if args.version {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    let prompt = match read_prompt(args.prompt) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            eprintln!("Error reading prompt: {err}");
+            std::process::exit(2);
+        }
+    };
+
+    let no_think = args.no_think;
+    let greedy = args.greedy;
+    let show_think = args.show_think;
+    let verbose = args.verbose;
+
+    // System awareness
+    let sys = qora::system::SystemInfo::detect();
+    let limits = sys.smart_limits();
+    if verbose {
+        eprintln!("QORA - Pure Rust Text-Only CPU Inference Engine");
+        eprintln!(
+            "System: {} MB RAM ({} MB free), {} threads",
+            sys.total_ram_mb, sys.available_ram_mb, sys.cpu_threads
+        );
+    }
+
+    // Preserve the existing smart defaults while allowing explicit overrides
+    let mut max_tokens = args.max_tokens.unwrap_or(limits.default_max_tokens);
+    let mut think_budget = args.think_budget.unwrap_or(limits.default_think_budget);
 
     // Hard cap: even explicit values get clamped on weak systems
     if think_budget > limits.max_think_budget {
-        eprintln!("System cap: think-budget {} → {}", think_budget, limits.max_think_budget);
+        if verbose {
+            eprintln!(
+                "System cap: think-budget {} → {}",
+                think_budget, limits.max_think_budget
+            );
+        }
         think_budget = limits.max_think_budget;
     }
     if max_tokens > limits.max_tokens {
-        eprintln!("System cap: max-tokens {} → {}", max_tokens, limits.max_tokens);
+        if verbose {
+            eprintln!(
+                "System cap: max-tokens {} → {}",
+                max_tokens, limits.max_tokens
+            );
+        }
         max_tokens = limits.max_tokens;
     }
 
-    if let Some(msg) = limits.warning {
-        eprintln!("WARNING: {msg}");
+    if verbose {
+        if let Some(msg) = limits.warning {
+            eprintln!("WARNING: {msg}");
+        }
     }
 
     // Auto-adjust: ensure enough room for the answer after thinking
@@ -87,41 +133,57 @@ fn main() {
             if max_tokens > limits.max_tokens {
                 max_tokens = limits.max_tokens;
             }
-            eprintln!("Auto-adjusted max-tokens to {} (think-budget {} + {} answer room)",
-                max_tokens, think_budget, min_answer);
+            if verbose {
+                eprintln!(
+                    "Auto-adjusted max-tokens to {} (think-budget {} + {} answer room)",
+                    max_tokens, think_budget, min_answer
+                );
+            }
         }
     }
 
     let mode_str = if no_think { "no-think" } else { "think" };
-    eprintln!("Prompt: {prompt}");
-    if let Some(ref img) = image_path {
-        eprintln!("Image: {}", img.display());
+    if verbose {
+        eprintln!("Prompt: {prompt}");
+        eprintln!("Mode: {mode_str}");
     }
-    if let Some(ref vid) = video_path {
-        eprintln!("Video: {}", vid.display());
-    }
-    eprintln!("Mode: {mode_str}");
 
     // Load model from same directory as the executable
     let exe_dir = std::env::current_exe()
         .expect("Cannot determine executable path")
-        .parent().unwrap().to_path_buf();
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let model_path = exe_dir.join("model.qor4b");
-    eprintln!("Loading model from {}...", model_path.display());
+    if verbose {
+        eprintln!("Loading model from {}...", model_path.display());
+    }
     let t0 = Instant::now();
-    let weights = qor4b::save::load_model(&model_path)
+    let weights = qora::save::load_model_text_with_verbosity(&model_path, verbose)
         .expect("Failed to load model");
     let mem_mb = weights.memory_bytes() / (1024 * 1024);
-    eprintln!("Model loaded in {:.1?} ({} format, {mem_mb} MB)", t0.elapsed(), weights.format_name);
+    if verbose {
+        eprintln!(
+            "Model loaded in {:.1?} ({} format, {mem_mb} MB)",
+            t0.elapsed(),
+            weights.format_name
+        );
+    }
 
     // Load tokenizer from same directory as the executable
     let tokenizer_path = exe_dir.join("tokenizer.json");
-    let tokenizer = qor4b::tokenizer::QoraTokenizer::from_file(&tokenizer_path)
+    let tokenizer = qora::tokenizer::QoraTokenizer::from_file(&tokenizer_path)
         .expect("Failed to load tokenizer");
 
-    let temperature = if greedy { 0.0 } else if no_think { 0.7 } else { 1.0 };
+    let temperature = if greedy {
+        0.0
+    } else if no_think {
+        0.7
+    } else {
+        1.0
+    };
 
-    let params = qor4b::generate::GenerateParams {
+    let params = qora::generate::GenerateParams {
         max_new_tokens: max_tokens,
         eos_token_id: weights.config.eos_token_id,
         temperature,
@@ -134,56 +196,6 @@ fn main() {
         think_budget,
     };
 
-    // Try GPU for text-only mode
-    #[cfg(any(feature = "gpu", feature = "gpu-metal"))]
-    if !force_cpu && image_path.is_none() && video_path.is_none() {
-        eprintln!("Attempting GPU inference...");
-        match qor4b::gpu_inference::generate_gpu(&weights, &tokenizer, &prompt, &params) {
-            Ok(()) => return,
-            Err(e) => eprintln!("GPU not available ({}), falling back to CPU", e),
-        }
-    }
-
-    if let Some(ref vid_path) = video_path {
-        // Video + text mode
-        let vision = weights.vision.as_ref()
-            .expect("Model has no vision weights");
-
-        eprintln!("Loading video frames...");
-        let (pixels, num_frames, height, width) = qor4b::vision::load_video_frames(vid_path)
-            .expect("Failed to load video frames");
-
-        eprintln!("Running vision encoder (video)...");
-        let t_vis = Instant::now();
-        let (vision_embeds, num_vision_tokens) = vision.encode_video(&pixels, num_frames, height, width);
-        eprintln!("Vision encoder: {} tokens in {:.1?}", num_vision_tokens, t_vis.elapsed());
-
-        qor4b::generate::generate_with_video(
-            &weights, &tokenizer, &prompt,
-            &vision_embeds, num_vision_tokens,
-            &params,
-        );
-    } else if let Some(ref img_path) = image_path {
-        // Image + text mode
-        let vision = weights.vision.as_ref()
-            .expect("Model has no vision weights");
-
-        eprintln!("Loading image...");
-        let (pixels, height, width) = qor4b::vision::load_image(img_path)
-            .expect("Failed to load image");
-
-        eprintln!("Running vision encoder...");
-        let t_vis = Instant::now();
-        let (vision_embeds, num_vision_tokens) = vision.encode_image(&pixels, height, width);
-        eprintln!("Vision encoder: {} tokens in {:.1?}", num_vision_tokens, t_vis.elapsed());
-
-        qor4b::generate::generate_with_image(
-            &weights, &tokenizer, &prompt,
-            &vision_embeds, num_vision_tokens,
-            &params,
-        );
-    } else {
-        // Text-only mode
-        qor4b::generate::generate(&weights, &tokenizer, &prompt, &params);
-    }
+    // Text-only CPU inference
+    qora::generate::generate_with_verbosity(&weights, &tokenizer, &prompt, &params, verbose);
 }
